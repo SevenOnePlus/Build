@@ -101,16 +101,29 @@ jobs:
 
       - name: 配置内核
         run: |
-          cd kernel_workspace_pure
+          cd kernel_workspace_pure/common
 
           # 设置 PATH
-          export PATH="$(pwd)/clang18/bin:$(pwd)/build-tools/bin:$PATH"
-          
+          export PATH="$(pwd)/../clang18/bin:$(pwd)/../build-tools/bin:$PATH"
+
           # 验证工具链
           echo "Clang 版本:"
           clang --version
           echo "LLD 版本:"
           ld.lld --version
+          
+          # 检查 defconfig 文件
+          echo "检查 defconfig 文件..."
+          ls -la arch/arm64/configs/ | head -20
+          
+          # 检查 gki_defconfig 是否存在
+          if [ -f "arch/arm64/configs/gki_defconfig" ]; then
+            echo "gki_defconfig 存在"
+          else
+            echo "gki_defconfig 不存在，查找可用的 defconfig:"
+            find arch/arm64/configs/ -name "*defconfig" | head -10
+            exit 1
+          fi
 
           export LLVM=1
           export ARCH=arm64
@@ -122,9 +135,9 @@ jobs:
 
       - name: 编译内核
         run: |
-          cd kernel_workspace_pure
+          cd kernel_workspace_pure/common
 
-          export PATH="$(pwd)/clang18/bin:$(pwd)/build-tools/bin:$PATH"
+          export PATH="$(pwd)/../clang18/bin:$(pwd)/../build-tools/bin:$PATH"
           export LLVM=1
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
