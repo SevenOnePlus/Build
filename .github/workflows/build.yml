@@ -1,0 +1,170 @@
+name: 纯净内核编译 6.6.89-SXA
+
+env:
+  TZ: Asia/Shanghai
+  KERNEL_VERSION: '6.6.89'
+  CUSTOM_SUFFIX: 'SXA'
+
+on:
+  workflow_dispatch:
+    inputs:
+      update_ccache:
+        description: '更新 ccache 缓存 (首次或更改配置时开启)'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-mark hold firefox &&
+          sudo apt-mark hold libc-bin &&
+          sudo rm -rf /var/lib/man-db/auto-update &&
+          sudo apt update &&
+          sudo apt-get install -y --no-install-recommends \
+            git curl bison flex make binutils \
+            libssl-dev libelf-dev zip unzip ccache \
+            clang-18 lld-18 llvm-18 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: 配置 ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_pure_6.6.89" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          mkdir -p $HOME/.ccache_pure_6.6.89
+
+      - name: 恢复 ccache 缓存
+        uses: actions/cache@v4
+        id: ccache-restore
+        with:
+          path: $HOME/.ccache_pure_6.6.89
+          key: ccache-pure-6.6.89-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-pure-6.6.89-${{ runner.os }}-
+
+      - name: 克隆内核源码
+        run: |
+          rm -rf kernel_workspace_pure
+          mkdir -p kernel_workspace_pure
+          cd kernel_workspace_pure
+          git clone --depth=1 https://github.com/cctv18/android_kernel_common_oneplus_sm8750 \
+            -b oneplus/sm8750_v_16.0.0_oneplus_13_6.6.89 common
+          echo "源码克隆完成"
+
+      - name: 预处理源码
+        run: |
+          cd kernel_workspace_pure/common
+
+          # 删除 ABI 保护文件
+          rm -f android/abi_gki_protected_exports_*
+          echo "已删除 ABI 保护文件"
+
+          # 去除 -dirty 后缀
+          for f in scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
+          done
+          echo "已去除 -dirty 后缀"
+
+          # 禁用 SCM 版本检测
+          sed -i 's/${scm_version}//' scripts/setlocalversion
+          echo "已禁用自动版本检测"
+
+          # 设置自定义版本后缀
+          CUSTOM_SUFFIX="${{ env.CUSTOM_SUFFIX }}"
+          sed -i "\$s|echo \"\\\$res\"|echo \"-${CUSTOM_SUFFIX}\"|" scripts/setlocalversion
+          sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"-${CUSTOM_SUFFIX}\"/" \
+            arch/arm64/configs/gki_defconfig
+          echo "CONFIG_LOCALVERSION_AUTO=n" >> arch/arm64/configs/gki_defconfig
+          echo "已设置版本号：${KERNEL_VERSION}-${CUSTOM_SUFFIX}"
+
+          # 禁用 defconfig 检查
+          sed -i 's/check_defconfig//' build.config.gki
+          echo "已禁用 defconfig 检查"
+
+      - name: 配置内核
+        run: |
+          cd kernel_workspace_pure/common
+          export LLVM=18
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export O=out
+
+          make LLVM=$LLVM ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE O=out gki_defconfig
+          echo "内核配置完成"
+
+      - name: 编译内核
+        run: |
+          cd kernel_workspace_pure/common
+
+          export LLVM=18
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export O=out
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${{ github.workspace }}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_HARDLINK="true"
+          export CCACHE_DIR="$HOME/.ccache_pure_6.6.89"
+          export CCACHE_MAXSIZE="3G"
+
+          echo "开始编译内核..."
+          echo "编译器：Clang $LLVM"
+          echo "架构：ARM64"
+          echo "线程数：$(nproc)"
+
+          make -j$(nproc --all) \
+            LLVM=$LLVM \
+            ARCH=$ARCH \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CC="ccache clang" \
+            LD=ld.lld \
+            HOSTCC=clang \
+            HOSTLD=ld.lld \
+            O=out \
+            KCFLAGS+=-O2 \
+            KCFLAGS+=-Wno-error \
+            Image
+
+          echo "编译完成"
+
+          # 显示 ccache 状态
+          ccache -s
+
+      - name: 保存 ccache 缓存
+        if: inputs.update_ccache
+        uses: actions/cache/save@v4
+        with:
+          path: $HOME/.ccache_pure_6.6.89
+          key: ccache-pure-6.6.89-${{ runner.os }}-${{ github.run_id }}
+
+      - name: 检查输出文件
+        run: |
+          IMAGE_PATH="kernel_workspace_pure/common/out/arch/arm64/boot/Image"
+          if [ -f "$IMAGE_PATH" ]; then
+            echo "✅ Image 文件存在"
+            ls -lh "$IMAGE_PATH"
+            du -h "$IMAGE_PATH"
+          else
+            echo "❌ Image 文件不存在"
+            exit 1
+          fi
+
+      - name: 上传 Image 文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-6.6.89-SXA
+          path: kernel_workspace_pure/common/out/arch/arm64/boot/Image
+          retention-days: 30
+          if-no-files-found: error
