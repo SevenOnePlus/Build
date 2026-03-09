@@ -17,24 +17,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: write
 
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
-
-      - name: 安装构建依赖
+      - name: 安装基础依赖
         run: |
           sudo apt-mark hold firefox &&
           sudo apt-mark hold libc-bin &&
           sudo rm -rf /var/lib/man-db/auto-update &&
           sudo apt update &&
           sudo apt-get install -y --no-install-recommends \
-            git curl bison flex make binutils \
-            libssl-dev libelf-dev zip unzip ccache \
-            clang-18 lld-18 llvm-18 \
+            aria2 unzip git curl bison flex make binutils \
+            libssl-dev libelf-dev ccache \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: 配置 ccache
@@ -52,14 +45,28 @@ jobs:
           restore-keys: |
             ccache-pure-6.6.89-${{ runner.os }}-
 
-      - name: 克隆内核源码
+      - name: 克隆内核源码和工具链
         run: |
           rm -rf kernel_workspace_pure
           mkdir -p kernel_workspace_pure
           cd kernel_workspace_pure
+
+          echo "正在克隆内核源码..."
           git clone --depth=1 https://github.com/cctv18/android_kernel_common_oneplus_sm8750 \
             -b oneplus/sm8750_v_16.0.0_oneplus_13_6.6.89 common
-          echo "源码克隆完成"
+
+          echo "正在下载 LLVM-Clang18 工具链..."
+          mkdir -p clang18
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/clang-r510928.zip -o clang.zip
+          unzip -q clang.zip -d clang18
+          rm -rf clang.zip
+
+          echo "正在下载构建工具..."
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/build-tools.zip -o build-tools.zip
+          unzip -q build-tools.zip
+          rm -rf build-tools.zip
+
+          echo "工具链初始化完成!"
 
       - name: 预处理源码
         run: |
@@ -94,8 +101,18 @@ jobs:
 
       - name: 配置内核
         run: |
-          cd kernel_workspace_pure/common
-          export LLVM=18
+          cd kernel_workspace_pure
+
+          # 设置 PATH
+          export PATH="$(pwd)/clang18/bin:$(pwd)/build-tools/bin:$PATH"
+          
+          # 验证工具链
+          echo "Clang 版本:"
+          clang --version
+          echo "LLD 版本:"
+          ld.lld --version
+
+          export LLVM=1
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export O=out
@@ -105,13 +122,13 @@ jobs:
 
       - name: 编译内核
         run: |
-          cd kernel_workspace_pure/common
+          cd kernel_workspace_pure
 
-          export LLVM=18
+          export PATH="$(pwd)/clang18/bin:$(pwd)/build-tools/bin:$PATH"
+          export LLVM=1
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export O=out
-          export PATH="/usr/lib/ccache:$PATH"
           export CCACHE_COMPILERCHECK="none"
           export CCACHE_BASEDIR="${{ github.workspace }}"
           export CCACHE_NOHASHDIR="true"
@@ -120,7 +137,10 @@ jobs:
           export CCACHE_MAXSIZE="3G"
 
           echo "开始编译内核..."
-          echo "编译器：Clang $LLVM"
+          echo "PATH: $PATH"
+          echo "Clang: $(which clang)"
+          echo "LLD: $(which ld.lld)"
+          echo "编译器：Clang"
           echo "架构：ARM64"
           echo "线程数：$(nproc)"
 
@@ -138,8 +158,6 @@ jobs:
             Image
 
           echo "编译完成"
-
-          # 显示 ccache 状态
           ccache -s
 
       - name: 保存 ccache 缓存
@@ -155,7 +173,6 @@ jobs:
           if [ -f "$IMAGE_PATH" ]; then
             echo "✅ Image 文件存在"
             ls -lh "$IMAGE_PATH"
-            du -h "$IMAGE_PATH"
           else
             echo "❌ Image 文件不存在"
             exit 1
